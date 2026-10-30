@@ -1,0 +1,74 @@
+name: Publish digest preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      include_marker:
+        description: Include the course marker (remove only after review and approval)
+        required: true
+        type: boolean
+        default: true
+
+concurrency:
+  group: digest-pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+      - name: Set up Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Install locked dependencies
+        run: npx --yes pnpm@10.34.9 install --frozen-lockfile --ignore-scripts
+      - name: Check application
+        run: |
+          npx --yes pnpm@10.34.9 test
+          npx --yes pnpm@10.34.9 typecheck
+      - name: Capture HTML from local rig
+        env:
+          INCLUDE_MARKER: ${{ inputs.include_marker }}
+          LANE_MARKER: ${{ inputs.include_marker && secrets.LANE_MARKER || '' }}
+          LANE_ID: lane-07
+        run: |
+          if [[ "$INCLUDE_MARKER" == "true" && -z "$LANE_MARKER" ]]; then
+            echo 'The course marker must be configured before publishing.' >&2
+            exit 1
+          fi
+          npx --yes pnpm@10.34.9 run preview "$RUNNER_TEMP/rig-preview/index.html"
+      - name: Upload temporary Pages artifact
+        id: upload
+        uses: actions/upload-pages-artifact@v4
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/rig-preview
+          retention-days: 1
+      - name: Deploy preview
+        id: deployment
+        uses: actions/deploy-pages@v4
+      - name: Remove temporary build artifact
+        if: always() && steps.upload.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          artifact_ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name == "github-pages") | .id')
+          while IFS= read -r artifact_id; do
+            if [[ -n "$artifact_id" ]]; then
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+            fi
+          done <<< "$artifact_ids"
